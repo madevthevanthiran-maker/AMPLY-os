@@ -1,0 +1,55 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model CalendarEvent {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  startTime   DateTime
+  endTime     DateTime
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  reminders   Reminder[]
+  notifications Notification[]
+}
+
+model Reminder {
+  id        String   @id @default(cuid())
+  eventId   String
+  remindAt  DateTime
+  sentAt    DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event     CalendarEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  notifications Notification[]
+
+  @@index([remindAt])
+  @@index([sentAt])
+  @@index([eventId])
+}
+
+model Notification {
+  id         String   @id @default(cuid())
+  eventId    String
+  reminderId String?
+  title      String
+  body       String?
+  channel    String   @default("in_app") // future-proofing
+  createdAt  DateTime @default(now())
+  readAt     DateTime?
+
+  event      CalendarEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  reminder   Reminder?     @relation(fields: [reminderId], references: [id], onDelete: SetNull)
+
+  @@index([readAt])
+  @@index([eventId])
+  @@index([reminderId])
+}
