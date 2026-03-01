@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 
+export const runtime = "nodejs";
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -13,12 +15,29 @@ export async function POST(req: Request) {
       );
     }
 
+    const start = new Date(startTime);
+    const end = new Date(endTime);
+
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      return NextResponse.json(
+        { ok: false, error: "startTime/endTime must be valid ISO dates" },
+        { status: 400 }
+      );
+    }
+
+    if (end.getTime() <= start.getTime()) {
+      return NextResponse.json(
+        { ok: false, error: "endTime must be after startTime" },
+        { status: 400 }
+      );
+    }
+
     const event = await prisma.calendarEvent.create({
       data: {
         title: String(title),
         description: description ? String(description) : null,
-        startTime: new Date(startTime),
-        endTime: new Date(endTime),
+        startTime: start,
+        endTime: end,
       },
     });
 
@@ -31,11 +50,24 @@ export async function POST(req: Request) {
   }
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
+    const url = new URL(req.url);
+    const limit = Math.min(Number(url.searchParams.get("limit") || "50"), 200);
+    const upcomingOnly = url.searchParams.get("upcomingOnly") === "1";
+
+    const now = new Date();
+
     const events = await prisma.calendarEvent.findMany({
+      where: upcomingOnly ? { endTime: { gte: now } } : undefined,
       orderBy: { startTime: "asc" },
-      include: { reminders: true },
+      take: limit,
+      include: {
+        reminders: {
+          orderBy: { remindAt: "asc" },
+          select: { id: true, remindAt: true, sentAt: true },
+        },
+      },
     });
 
     return NextResponse.json({ ok: true, events });

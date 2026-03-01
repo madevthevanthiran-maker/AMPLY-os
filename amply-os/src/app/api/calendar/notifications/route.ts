@@ -1,62 +1,82 @@
+// src/app/api/calendar/notifications/route.ts
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import prisma from "@/lib/prisma";
 
+export const runtime = "nodejs";
+
+// GET /api/calendar/notifications?limit=5&unreadOnly=1
 export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const limit = Math.min(Number(searchParams.get("limit") ?? 50), 200);
-  const unreadOnly = searchParams.get("unreadOnly") === "1";
-
-  const notifications = await prisma.notification.findMany({
-    where: unreadOnly ? { readAt: null } : undefined,
-    orderBy: { createdAt: "desc" },
-    take: limit,
-  });
-
-  return NextResponse.json({ ok: true, notifications });
-}
-
-export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const { eventId, title, body: msgBody, reminderId } = body ?? {};
+    const url = new URL(req.url);
 
-    if (!eventId || !title) {
-      return NextResponse.json(
-        { ok: false, error: "eventId and title are required" },
-        { status: 400 }
-      );
-    }
+    const limitRaw = url.searchParams.get("limit");
+    const unreadOnlyRaw = url.searchParams.get("unreadOnly");
 
-    // Ensure event exists
-    const ev = await prisma.calendarEvent.findUnique({ where: { id: eventId } });
-    if (!ev) {
-      return NextResponse.json({ ok: false, error: "Event not found" }, { status: 404 });
-    }
+    const limitNum = limitRaw ? Number(limitRaw) : 10;
+    const limit = Number.isFinite(limitNum) ? Math.max(1, Math.min(50, limitNum)) : 10;
 
-    // If reminderId provided, validate it belongs to same event
-    if (reminderId) {
-      const rem = await prisma.reminder.findUnique({ where: { id: reminderId } });
-      if (!rem || rem.eventId !== eventId) {
-        return NextResponse.json(
-          { ok: false, error: "Invalid reminderId for this event" },
-          { status: 400 }
-        );
-      }
-    }
+    const unreadOnly =
+      unreadOnlyRaw === "1" ||
+      unreadOnlyRaw === "true" ||
+      unreadOnlyRaw === "yes";
 
-    const notification = await prisma.notification.create({
-      data: {
-        eventId,
-        reminderId: reminderId ?? null,
-        title,
-        body: msgBody ?? null,
+    const notifications = await prisma.notification.findMany({
+      where: unreadOnly ? { readAt: null } : undefined,
+      orderBy: { createdAt: "desc" },
+      take: limit,
+      select: {
+        id: true,
+        title: true,
+        body: true,
+        channel: true,
+        createdAt: true,
+        readAt: true,
+        eventId: true,
+        reminderId: true,
       },
     });
 
-    return NextResponse.json({ ok: true, notification });
-  } catch (e: any) {
+    const unreadCount = await prisma.notification.count({
+      where: { readAt: null },
+    });
+
+    return NextResponse.json({ ok: true, unreadCount, notifications });
+  } catch (err: any) {
     return NextResponse.json(
-      { ok: false, error: e?.message ?? "Unknown error" },
+      { ok: false, error: err?.message || "Unknown error" },
+      { status: 500 }
+    );
+  }
+}
+
+// PATCH /api/calendar/notifications  { ids?: string[] }  -> mark read
+export async function PATCH(req: Request) {
+  try {
+    const body = await req.json().catch(() => ({}));
+    const ids = Array.isArray(body?.ids)
+      ? body.ids.filter((x: any) => typeof x === "string")
+      : [];
+
+    if (ids.length === 0) {
+      await prisma.notification.updateMany({
+        where: { readAt: null },
+        data: { readAt: new Date() },
+      });
+    } else {
+      await prisma.notification.updateMany({
+        where: { id: { in: ids } },
+        data: { readAt: new Date() },
+      });
+    }
+
+    const unreadCount = await prisma.notification.count({
+      where: { readAt: null },
+    });
+
+    return NextResponse.json({ ok: true, unreadCount });
+  } catch (err: any) {
+    return NextResponse.json(
+      { ok: false, error: err?.message || "Unknown error" },
       { status: 500 }
     );
   }

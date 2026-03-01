@@ -1,27 +1,36 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import prisma from "@/lib/prisma";
+import { getNotifBus } from "@/lib/notifyBus";
+
+export const runtime = "nodejs";
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const ids: string[] = body?.ids ?? [];
+    const body = await req.json().catch(() => ({}));
+    const ids: string[] = Array.isArray(body?.ids) ? body.ids : [];
 
-    if (!Array.isArray(ids) || ids.length === 0) {
+    if (ids.length === 0) {
       return NextResponse.json(
         { ok: false, error: "ids[] is required" },
         { status: 400 }
       );
     }
 
-    const res = await prisma.notification.updateMany({
+    const now = new Date();
+
+    const updated = await prisma.notification.updateMany({
       where: { id: { in: ids } },
-      data: { readAt: new Date() },
+      data: { readAt: now },
     });
 
-    return NextResponse.json({ ok: true, updated: res.count });
-  } catch (e: any) {
+    // Emit SSE event
+    const bus = getNotifBus();
+    bus.emit("read", { ids });
+
+    return NextResponse.json({ ok: true, updated: updated.count });
+  } catch (err: any) {
     return NextResponse.json(
-      { ok: false, error: e?.message ?? "Unknown error" },
+      { ok: false, error: err?.message || "Unknown error" },
       { status: 500 }
     );
   }

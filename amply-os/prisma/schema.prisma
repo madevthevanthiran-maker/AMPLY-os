@@ -8,27 +8,27 @@ datasource db {
 }
 
 model CalendarEvent {
-  id          String   @id @default(cuid())
-  title       String
-  description String?
-  startTime   DateTime
-  endTime     DateTime
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id            String   @id @default(cuid())
+  title         String
+  description   String?
+  startTime     DateTime
+  endTime       DateTime
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-  reminders   Reminder[]
+  reminders     Reminder[]
   notifications Notification[]
 }
 
 model Reminder {
-  id        String   @id @default(cuid())
-  eventId   String
-  remindAt  DateTime
-  sentAt    DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id            String   @id @default(cuid())
+  eventId       String
+  remindAt      DateTime
+  sentAt        DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-  event     CalendarEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  event         CalendarEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
   notifications Notification[]
 
   @@index([remindAt])
@@ -42,7 +42,7 @@ model Notification {
   reminderId String?
   title      String
   body       String?
-  channel    String   @default("in_app") // future-proofing
+  channel    String   @default("in_app")
   createdAt  DateTime @default(now())
   readAt     DateTime?
 
@@ -52,4 +52,55 @@ model Notification {
   @@index([readAt])
   @@index([eventId])
   @@index([reminderId])
+}
+
+// ✅ AMP MEMORY (single-user v1)
+model AmpMemory {
+  id         String   @id @default(cuid())
+  mode       String
+  type       String
+  key        String
+  value      String
+
+  confidence Int      @default(60)
+  pinned     Boolean  @default(false)
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  lastUsedAt DateTime?
+
+  @@unique([mode, type, key], name: "mode_type_key")
+
+  @@index([updatedAt])
+  @@index([lastUsedAt])
+  @@index([pinned])
+  @@index([mode])
+  @@index([type])
+}
+
+// ✅ CHAT (single-user v1)
+model ChatSession {
+  id        String      @id @default(cuid())
+  mode      String      @default("student")
+  title     String?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  messages  ChatMessage[]
+
+  @@index([mode])
+  @@index([updatedAt])
+}
+
+model ChatMessage {
+  id        String      @id @default(cuid())
+  sessionId String
+  role      String
+  text      String
+  ts        BigInt      // ✅ epoch ms BIGINT
+
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([ts])
 }

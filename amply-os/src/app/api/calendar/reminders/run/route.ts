@@ -1,50 +1,95 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import prisma from "@/lib/prisma";
+import { getNotifBus } from "@/lib/notifyBus";
+
+export const runtime = "nodejs";
 
 export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const limit = Math.min(Number(searchParams.get("limit") ?? 20), 200);
+  try {
+    const url = new URL(req.url);
 
-  const now = new Date();
+    // --- CRON AUTH (query param) ---
+    const secret = url.searchParams.get("secret");
+    const envSecret = process.env.CRON_SECRET;
 
-  const due = await prisma.reminder.findMany({
-    where: {
-      sentAt: null,
-      remindAt: { lte: now },
-    },
-    orderBy: { remindAt: "asc" },
-    take: limit,
-  });
-
-  let created = 0;
-
-  for (const r of due) {
-    const ev = await prisma.calendarEvent.findUnique({ where: { id: r.eventId } });
-    if (!ev) {
-      // event deleted, just mark reminder as sent so it doesn't loop forever
-      await prisma.reminder.update({
-        where: { id: r.id },
-        data: { sentAt: now },
-      });
-      continue;
+    if (envSecret && secret !== envSecret) {
+      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
     }
 
-    await prisma.notification.create({
-      data: {
-        eventId: ev.id,
-        reminderId: r.id,
-        title: `Reminder: ${ev.title}`,
-        body: ev.description ?? null,
+    const limit = Math.min(Number(url.searchParams.get("limit") || "20"), 200);
+    const now = new Date();
+
+    const due = await prisma.reminder.findMany({
+      where: {
+        sentAt: null,
+        remindAt: { lte: now },
       },
+      include: { event: true },
+      orderBy: { remindAt: "asc" },
+      take: limit,
     });
 
-    await prisma.reminder.update({
-      where: { id: r.id },
-      data: { sentAt: now },
+    if (due.length === 0) {
+      return NextResponse.json({ ok: true, ran: 0, created: 0 });
+    }
+
+    const bus = getNotifBus();
+
+    const result = await prisma.$transaction(async (tx) => {
+      let created = 0;
+
+      for (const r of due) {
+        if (!r.event) {
+          // event missing: mark reminder sent to avoid infinite loop
+          await tx.reminder.update({ where: { id: r.id }, data: { sentAt: now } });
+          continue;
+        }
+
+        // Prevent duplicates WITHOUT schema changes:
+        // if a notif already exists for this reminder, mark sent + skip create.
+        const existing = await tx.notification.findFirst({
+          where: { reminderId: r.id },
+          select: { id: true },
+        });
+
+        if (existing) {
+          await tx.reminder.update({ where: { id: r.id }, data: { sentAt: now } });
+          continue;
+        }
+
+        const notif = await tx.notification.create({
+          data: {
+            eventId: r.eventId,
+            reminderId: r.id,
+            title: "Reminder",
+            body: `${r.event.title} is coming up (${new Date(r.event.startTime).toLocaleString()})`,
+            channel: "in_app",
+          },
+        });
+
+        await tx.reminder.update({
+          where: { id: r.id },
+          data: { sentAt: now },
+        });
+
+        created++;
+
+        // Emit SSE event (post-create)
+        bus.emit("new", {
+          notificationId: notif.id,
+          eventId: notif.eventId,
+          reminderId: notif.reminderId,
+        });
+      }
+
+      return { ran: due.length, created };
     });
 
-    created++;
+    return NextResponse.json({ ok: true, ...result });
+  } catch (err: any) {
+    return NextResponse.json(
+      { ok: false, error: err?.message || "Unknown error" },
+      { status: 500 }
+    );
   }
-
-  return NextResponse.json({ ok: true, ran: due.length, created });
 }

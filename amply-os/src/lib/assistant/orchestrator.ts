@@ -1,12 +1,8 @@
 // src/lib/assistant/orchestrator.ts
-// AMPlyAI Assistant Orchestrator (Brain v1 – Jarvis Mode)
-//
-// - Deterministic routing (router.ts)
-// - Direct engine execution (no fetch)
-// - Guaranteed action emission for focus intent
-// - trust: "auto" for internal focus actions
+// AMPlyAI Assistant Orchestrator (Brain v2)
 
 import { runEngine } from "@/lib/engines";
+import type { EngineName, RouteDecision } from "@/lib/assistant/router";
 import { routeUserMessage } from "@/lib/assistant/router";
 import {
   coachFromDirect,
@@ -15,14 +11,13 @@ import {
   coachFromWorkout,
   type CoachStep,
 } from "@/lib/assistant/coach";
-import type { EngineName, RouteDecision } from "@/lib/assistant/router";
 import type { Action } from "@/lib/actions/types";
 import { registerInternalActionExecutors } from "@/lib/actions/executors/internal";
+import { ASSISTANT_NAME } from "@/lib/assistant/constants";
+import { chatLLM, type LLMMessage } from "@/lib/assistant/llm";
 
-// register executors once
+// Register internal executors once per server runtime.
 registerInternalActionExecutors();
-
-/* ================= TYPES ================= */
 
 export type AssistantRequest = {
   message: string;
@@ -30,8 +25,8 @@ export type AssistantRequest = {
 };
 
 export type ToolCallRecord = {
-  tool: "engine";
-  engine: EngineName;
+  tool: "engine" | "llm";
+  engine?: EngineName;
   mode: string;
   goal: string;
   output: unknown;
@@ -47,6 +42,7 @@ export type AssistantResponse = {
   assistant: {
     text: string;
     tone?: "coach" | "neutral";
+    name?: string;
   };
   toolCalls: ToolCallRecord[];
   actions: Action[];
@@ -57,21 +53,26 @@ export type AssistantResponse = {
   };
 };
 
-/* ================= HELPERS ================= */
-
 function safeString(x: unknown, fallback = "") {
   return typeof x === "string" ? x : fallback;
 }
 
-function deriveGoal(message: string): string {
+function deriveGoal(message: string, engine: EngineName): string {
   const t = message.trim();
   if (!t) return "";
+
   const explicit = t.match(/\bgoal\s*:\s*(.+)$/i);
-  return explicit?.[1]?.trim() ?? t;
+  if (explicit?.[1]) return explicit[1].trim();
+
+  return t;
 }
 
-async function callEngine(engine: EngineName, mode: string, goal: string) {
-  return runEngine(engine as any, mode as any, goal);
+async function callEngine(params: {
+  engine: EngineName;
+  mode: string;
+  goal: string;
+}): Promise<any> {
+  return runEngine(params.engine as any, params.mode as any, params.goal);
 }
 
 function coachForEngine(engine: EngineName, output: any) {
@@ -81,51 +82,17 @@ function coachForEngine(engine: EngineName, output: any) {
   return coachFromDirect();
 }
 
-/* ================= FOCUS LOGIC ================= */
-
-function isFocusIntent(message: string, route: RouteDecision): boolean {
-  const tags = (route as any)?.tags as string[] | undefined;
-  if (Array.isArray(tags) && tags.includes("focus")) return true;
-
-  const t = message.toLowerCase();
-  return (
-    t.includes("pomodoro") ||
-    t.includes("focus block") ||
-    t.includes("start focus") ||
-    (t.includes("focus") && (t.includes("min") || t.includes("minutes"))) ||
-    t.includes("study for")
-  );
+function systemPrompt(mode: string) {
+  return `
+You are AMP, the assistant inside AMPLY OS.
+Tone: calm operator + sharp co-pilot (50/50). Helpful, concise, not robotic.
+Rules:
+- If the user asks "what can you do", describe capabilities inside AMPLY OS (calendar, reminders, notifications, memory, planning).
+- If the user message is vague, ask ONE clarifying question.
+- If the user asks for an outcome, propose a short plan and offer to execute next step.
+- Respect remembered preferences (e.g., short answers) when present in context.
+`.trim();
 }
-
-function parseDurationMin(message: string): number {
-  const m = message.match(/\b(\d{1,3})\s*(min|minutes)\b/i);
-  const n = m?.[1] ? Number(m[1]) : 25;
-  if (!Number.isFinite(n) || n <= 0) return 25;
-  return Math.max(5, Math.min(180, n));
-}
-
-function makeAutoFocusAction(message: string): Action {
-  const durationMin = parseDurationMin(message);
-  const breakMin = durationMin >= 20 ? 5 : 2;
-
-  return {
-    id: `act_focus_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-    type: "start_focus_block",
-    label: `Start ${durationMin}-min focus`,
-    trust: "auto", // 🔥 JARVIS MODE
-    priority: "high",
-    reason: "You asked to focus. Executing immediately.",
-    payload: {
-      title: "Focus Block",
-      durationMin,
-      breakMin,
-      mode: "pomodoro",
-    },
-    createdAt: new Date().toISOString(),
-  };
-}
-
-/* ================= MAIN ================= */
 
 export async function runAssistant(req: AssistantRequest): Promise<AssistantResponse> {
   const message = safeString(req.message);
@@ -135,23 +102,30 @@ export async function runAssistant(req: AssistantRequest): Promise<AssistantResp
 
   const toolCalls: ToolCallRecord[] = [];
   const memoryWrites: MemoryWrite[] = [];
+  const seedActions = route.seedActions ?? [];
 
-  const actions: Action[] = [];
-
-  // 🔥 GUARANTEED FOCUS ACTION
-  if (isFocusIntent(message, route)) {
-    actions.push(makeAutoFocusAction(message));
-  }
-
-  // NO ENGINE
+  // NO ENGINE PATH -> REAL CHAT (LLM)
   if (route.engine === "none") {
-    const coached = coachFromDirect(actions);
+    const messages: LLMMessage[] = [
+      { role: "system", content: systemPrompt(mode) },
+      { role: "user", content: message },
+    ];
+
+    const llm = await chatLLM(messages);
+
+    toolCalls.push({
+      tool: "llm",
+      mode,
+      goal: "conversational_response",
+      output: { ok: llm.ok, text: llm.text },
+    });
+
+    const coached = coachFromDirect(seedActions);
 
     return {
       assistant: {
-        text: actions.length
-          ? "Starting your focus block now."
-          : "Tell me what you want to do next.",
+        name: ASSISTANT_NAME,
+        text: llm.text,
         tone: "neutral",
       },
       toolCalls,
@@ -162,11 +136,11 @@ export async function runAssistant(req: AssistantRequest): Promise<AssistantResp
     };
   }
 
-  // ENGINE PATH
+  // ENGINE PATH (existing)
   const engine = route.engine;
-  const goal = deriveGoal(message);
+  const goal = deriveGoal(message, engine);
 
-  const output = await callEngine(engine, mode, goal);
+  const output = await callEngine({ engine, mode, goal });
 
   toolCalls.push({
     tool: "engine",
@@ -177,19 +151,23 @@ export async function runAssistant(req: AssistantRequest): Promise<AssistantResp
   });
 
   const coached = coachForEngine(engine, output);
+  const actions: Action[] = [...seedActions, ...coached.actions];
+
+  const assistantText =
+    engine === "plan"
+      ? `${ASSISTANT_NAME} generated your plan. Pick the first task — I’ll push the next step.`
+      : engine === "workout"
+      ? `${ASSISTANT_NAME} built your workout. Start when you’re ready — log the result after.`
+      : `${ASSISTANT_NAME} summarized it. Want me to convert this into next actions?`;
 
   return {
     assistant: {
-      text:
-        engine === "plan"
-          ? "Plan ready. Starting focus."
-          : engine === "workout"
-          ? "Workout ready. Let’s go."
-          : "Summary ready.",
+      name: ASSISTANT_NAME,
+      text: assistantText,
       tone: "coach",
     },
     toolCalls,
-    actions: [...actions, ...coached.actions],
+    actions,
     coachSteps: coached.steps,
     memoryWrites,
     debug: { route },
